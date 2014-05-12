@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import webbrowser
-import shelve
-import shutil
-import json
-import urllib.request
-import os
+import argparse
+import glob
 import hashlib
+import json
+import os
+import shelve
+import time
+import urllib.request
+import webbrowser
+from concurrent import futures
 from urllib.parse import urlparse, parse_qs
 
 
 APP_ID = '3889070'
 APP_SCOPE = 'audio,offline'
 AUTH_FILE = '.auth_data'
+OUTPUT_FOLDER = 'vk_music'
+
+
+def hash_file(file, algorithm='sha512', chunk_size=None):
+    hash_ = getattr(hashlib, algorithm)()
+
+    with open(file, 'rb') as f:
+        for chunk in iter(lambda: f.read(chunk_size), b''):
+            hash_.update(chunk)
+
+    return hash_.hexdigest()
 
 
 class APIException(Exception):
@@ -30,20 +44,17 @@ class Authorization():
         self.uid = None
         self.expires_in = None
 
-        db = shelve.open(AUTH_FILE)
-
-        if 'access_token' not in db or 'uid' not in db or 'expires_in' not in db:
-            self._open_auth_dialog()
-            self._parse_redirect_url()
-            db['access_token'] = self.access_token
-            db['uid'] = self.uid
-            db['expires_in'] = self.expires_in
-        else:
-            self.access_token = db['access_token']
-            self.uid = db['uid']
-            self.expires_in = db['expires_in']
-
-        db.close()
+        with shelve.open(AUTH_FILE) as db:
+            try:
+                self.access_token = db['access_token']
+                self.uid = db['uid']
+                self.expires_in = db['expires_in']
+            except KeyError:
+                self._open_auth_dialog()
+                self._parse_redirect_url()
+                db['access_token'] = self.access_token
+                db['uid'] = self.uid
+                db['expires_in'] = self.expires_in
 
     def _open_auth_dialog(self):
         url = (
@@ -70,14 +81,12 @@ class Authorization():
 
 
 class UserMusic(object):
-    def __init__(self, uid, access_token):
+    def __init__(self, uid, access_token, output_folder):
         self.uid = uid
         self.access_token = access_token
+        self.output_folder = output_folder
+        self.hashes = self.get_hashes()
 
-        #url = 'https://api.vk.com/method/audio.get.json'
-        #payloads = {'uid': self.uid, 'access_token': self.access_token}
-        #self.response = requests.get(url, params=payloads).json()
-        #self.music_list = self.response['response']
         url = (
             "https://api.vkontakte.ru/method/audio.get.json?"
             "uid={uid}&access_token={access_token}"
@@ -87,36 +96,49 @@ class UserMusic(object):
         self._content = json.loads(content.decode('utf-8'))
         self.music_list = self._content['response']
 
-    def download(self, title=None, dest='music collection'):
-        if not os.path.exists(dest):
-            os.makedirs(dest)
-        if title is None:
-            for counter, track in enumerate(reversed(self.music_list)):
-                with urllib.request.urlopen(track['url']) as track_resp,\
-                    open(os.path.join(dest, '{0:04d}.mp3'.format(counter)), 'wb') as out_file:
-                    shutil.copyfileobj(track_resp, out_file)
-        else:
-            for counter, track in enumerate(self.music_list):
-                if '{0} – {1}'.format(track['artist'], track['title']) == title:
-                    break
-                with urllib.request.urlopen(track['url']) as track_resp,\
-                    open(os.path.join(dest, '{0:04d}.mp3'.format(counter)), 'wb') as out_file:
-                    shutil.copyfileobj(track_resp, out_file)
+    def get_hashes(self):
+        hashes = {}
+        f_list = glob.glob(os.path.join(os.getcwd(), self.output_folder, '*.mp3'))
+        for f in f_list:
+            hashes[hash_file(f)] = f
 
+        return hashes
 
-def hash_file(file, chunk_size=8192):
-    md5 = hashlib.md5()
+    def download(self):
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
 
-    with open(file, 'rb') as f:
-        for chunk in iter(lambda: f.read(chunk_size), b''):
-            md5.update(chunk)
+        with futures.ProcessPoolExecutor(max_workers=4) as executor:
+            executor.map(self._download_track, reversed(self.music_list))
 
-    return md5.hexdigest()
+    def _download_track(self, track):
+        track_content = urllib.request.urlopen(track['url']).read()
+        track_hash = hashlib.sha512()
+        track_hash.update(track_content)
+        hexdigest = track_hash.hexdigest()
+
+        if hexdigest in self.hashes:
+            print('skipped: ', track['artist'], '-', track['title'])
+            return
+        with open(os.path.join(self.output_folder, '{}.mp3'.format(hexdigest)), 'wb') as out_file:
+            out_file.write(track_content)
+
+        self.hashes[out_file.name] = track_hash
+        print(track['artist'], '-', track['title'])
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', '--destination', action='store', dest='output_folder',
+                        default=OUTPUT_FOLDER, help='Output folder')
+    cli_args = parser.parse_args()
+
     auth = Authorization(APP_ID, APP_SCOPE)
 
-    music = UserMusic(auth.uid, auth.access_token)
-    #print(json.dumps(music.music_list, indent=4))
-    music.download('Snow Patrol – Called Out In The Dark')
+    music = UserMusic(auth.uid, auth.access_token, output_folder=cli_args.output_folder)
+    print('Starting download your vk music collection.')
+    t = time.time()
+    music.download()
+    print('Download complete')
+    print('Processing time: {} seconds'.format(time.time() - t))
+

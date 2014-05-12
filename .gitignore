@@ -1,5 +1,5 @@
 *.pyc
 .idea/
 
-music collection/
+*.mp3
 .auth_data
