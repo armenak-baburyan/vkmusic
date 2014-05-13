@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import glob
-import hashlib
 import json
 import os
 import shelve
+import shutil
 import time
 import urllib.request
 import webbrowser
@@ -18,16 +17,6 @@ APP_ID = '3889070'
 APP_SCOPE = 'audio,offline'
 AUTH_FILE = '.auth_data'
 OUTPUT_FOLDER = 'vk_music'
-
-
-def hash_file(file, algorithm='sha512', chunk_size=None):
-    hash_ = getattr(hashlib, algorithm)()
-
-    with open(file, 'rb') as f:
-        for chunk in iter(lambda: f.read(chunk_size), b''):
-            hash_.update(chunk)
-
-    return hash_.hexdigest()
 
 
 class APIException(Exception):
@@ -84,8 +73,12 @@ class UserMusic(object):
     def __init__(self, uid, access_token, output_folder):
         self.uid = uid
         self.access_token = access_token
+
         self.output_folder = output_folder
-        self.hashes = self.get_hashes()
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
+
+        self.aids = {x[:-4] for x in os.listdir(self.output_folder)}
 
         url = (
             "https://api.vkontakte.ru/method/audio.get.json?"
@@ -96,35 +89,21 @@ class UserMusic(object):
         self._content = json.loads(content.decode('utf-8'))
         self.music_list = self._content['response']
 
-    def get_hashes(self):
-        hashes = {}
-        f_list = glob.glob(os.path.join(os.getcwd(), self.output_folder, '*.mp3'))
-        for f in f_list:
-            hashes[hash_file(f)] = f
-
-        return hashes
-
     def download(self):
-        if not os.path.exists(self.output_folder):
-            os.makedirs(self.output_folder)
-
         with futures.ProcessPoolExecutor(max_workers=4) as executor:
-            executor.map(self._download_track, reversed(self.music_list))
+            executor.map(self.get_track, reversed(self.music_list))
 
-    def _download_track(self, track):
-        track_content = urllib.request.urlopen(track['url']).read()
-        track_hash = hashlib.sha512()
-        track_hash.update(track_content)
-        hexdigest = track_hash.hexdigest()
-
-        if hexdigest in self.hashes:
-            print('skipped: ', track['artist'], '-', track['title'])
+    def get_track(self, track):
+        track_name = '{artist} - {title}'.format(**track)
+        if str(track['aid']) in self.aids:
+            print('skipped: ', track_name)
             return
-        with open(os.path.join(self.output_folder, '{}.mp3'.format(hexdigest)), 'wb') as out_file:
-            out_file.write(track_content)
 
-        self.hashes[out_file.name] = track_hash
-        print(track['artist'], '-', track['title'])
+        with urllib.request.urlopen(track['url']) as track_resp,\
+                open(os.path.join(self.output_folder, '{}.mp3'.format(track['aid'])), 'wb') as out_file:
+            shutil.copyfileobj(track_resp, out_file)
+        self.aids.add(track['aid'])
+        print(track_name, '-->', out_file.name)
 
 
 if __name__ == '__main__':
@@ -136,9 +115,9 @@ if __name__ == '__main__':
     auth = Authorization(APP_ID, APP_SCOPE)
 
     music = UserMusic(auth.uid, auth.access_token, output_folder=cli_args.output_folder)
-    print('Starting download your vk music collection.')
+    print('Downloading Your vk Music Collection.')
     t = time.time()
     music.download()
-    print('Download complete')
-    print('Processing time: {} seconds'.format(time.time() - t))
+    print('Download Complete')
+    print('Processing Time: {} seconds'.format(time.time() - t))
 
