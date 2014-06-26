@@ -9,7 +9,6 @@ import shutil
 import time
 import urllib.request
 import webbrowser
-from collections import OrderedDict
 from concurrent import futures
 from html import unescape
 from urllib.parse import urlparse, parse_qs
@@ -81,6 +80,7 @@ class UserMusic(object):
         self.access_token = access_token
         self.output_folder = output_folder
         self.album = album
+        self.cpu_count = os.cpu_count()
 
         if not os.path.exists(self.output_folder):
             os.makedirs(self.output_folder)
@@ -134,7 +134,7 @@ class UserMusic(object):
             print('*' * 80, 'Songs is up to date', '*' * 80, sep='\n')
 
     def download(self):
-        with futures.ProcessPoolExecutor(max_workers=4) as executor:
+        with futures.ProcessPoolExecutor(max_workers=self.cpu_count) as executor:
             executor.map(self._get_track, self.tracks_map.values())
 
     def _get_track(self, track):
@@ -147,7 +147,7 @@ class UserMusic(object):
         print('\u2705', track_name, '-->', out_file.name)
 
     def update_tags(self):
-        with futures.ProcessPoolExecutor(max_workers=4) as executor:
+        with futures.ProcessPoolExecutor(max_workers=self.cpu_count) as executor:
             executor.map(self._update_track_tags, self.tracks_map.values())
 
     def _update_track_tags(self, track):
