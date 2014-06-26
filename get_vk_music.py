@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import glob
 import json
 import os
-import re
 import shelve
 import shutil
 import time
 import urllib.request
 import webbrowser
+from collections import OrderedDict
 from concurrent import futures
 from html import unescape
 from urllib.parse import urlparse, parse_qs
@@ -81,11 +80,12 @@ class UserMusic(object):
         self.uid = uid
         self.access_token = access_token
         self.output_folder = output_folder
-        if not os.path.exists(self.output_folder):
-            os.makedirs(self.output_folder)
         self.album = album
 
-        self.aids = {x[:-4] for x in os.listdir(self.output_folder)}
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
+
+        self.folder_aids = {x[:-4] for x in os.listdir(self.output_folder)}
 
         url = (
             "https://api.vkontakte.ru/method/audio.get.json?"
@@ -95,47 +95,85 @@ class UserMusic(object):
         content = response.read()
         self._content = json.loads(content.decode('utf-8'))
         self.music_list = self._content['response']
-        self.map = {str(track['aid']): {'artist': track['artist'], 'title': track['title']} for track in self.music_list}
+
+        # self.tracks_map = OrderedDict()
+        self.tracks_map = {}
+        for track in reversed(self.music_list):
+            self.tracks_map[str(track['aid'])] = {
+                'artist': unescape(track['artist']),
+                'title': unescape(track['title']),
+                'url': track['url'],
+                'output_path': os.path.join(output_folder, '{}.mp3'.format(track['aid']))
+            }
+
+    def __call__(self):
+        # remove deleted songs from vk
+        drop_aids = self.folder_aids.difference(self.tracks_map.keys())
+        if drop_aids:
+            self.pprint('Removing Deleted Songs')
+
+            for drop_aid in drop_aids:
+                f = os.path.join(self.output_folder, '{}.mp3'.format(drop_aid))
+                os.remove(f)
+                print('\u2718', f)
+                self.folder_aids.remove(drop_aid)
+
+        # which tracks to process
+        for aid in self.folder_aids:
+            del self.tracks_map[aid]
+
+        if self.tracks_map:
+            t = time.time()
+            self.pprint('Downloading New Songs from Your vk Music Collection.')
+            self.download()
+
+            self.pprint('Updating Songs Tags')
+            self.update_tags()
+            print('#' * 80, 'Processing Time: {} seconds'.format(time.time() - t), sep='\n')
+        else:
+            print('*' * 80, 'Songs is up to date', '*' * 80, sep='\n')
 
     def download(self):
         with futures.ProcessPoolExecutor(max_workers=4) as executor:
-            executor.map(self._get_track, reversed(self.music_list))
+            executor.map(self._get_track, self.tracks_map.values())
 
     def _get_track(self, track):
         track_name = '{artist} - {title}'.format(**track)
-        if str(track['aid']) in self.aids:
-            return
 
         with urllib.request.urlopen(track['url']) as track_resp,\
-                open(os.path.join(self.output_folder, '{}.mp3'.format(track['aid'])), 'wb') as out_file:
+                open(track['output_path'], 'wb') as out_file:
             shutil.copyfileobj(track_resp, out_file)
-        self.aids.add(track['aid'])
+
         print('\u2705', track_name, '-->', out_file.name)
 
     def update_tags(self):
         with futures.ProcessPoolExecutor(max_workers=4) as executor:
-            executor.map(self._update_track_tags, glob.glob(os.path.join(self.output_folder, '*.mp3')))
+            executor.map(self._update_track_tags, self.tracks_map.values())
 
-    def _update_track_tags(self, fname):
-        pattern = re.compile(r'.*/(\d+).mp3')
-        m = re.search(pattern, fname)
-        aid = m.group(1)
-        artist = unescape(self.map[aid]['artist'])
-        title = unescape(self.map[aid]['title'])
+    def _update_track_tags(self, track):
+        fname = track['output_path']
+        artist = track['artist']
+        title = track['title']
 
         # http://stackoverflow.com/a/14040318/1886653
         try:
             tags = ID3(fname)
+            tags.delete()
         except ID3NoHeaderError:
             tags = ID3()
 
-        tags.delete()
         tags["TALB"] = TALB(encoding=3, text=self.album)
         tags["TIT2"] = TIT2(encoding=3, text=artist)
         tags["TPE1"] = TPE1(encoding=3, text=title)
         tags["TPE2"] = TPE2(encoding=3, text=self.album)
         tags.save(fname)
+
         print('\u2705', fname, '-->', '{} - {} - {}'.format(self.album, artist, title))
+
+    @staticmethod
+    def pprint(s, symbol='*', count=80):
+        print(symbol * count, s, symbol*count, sep='\n')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -146,11 +184,4 @@ if __name__ == '__main__':
     cli_args = parser.parse_args()
 
     auth = Authorization(APP_ID, APP_SCOPE)
-
-    t = time.time()
-    music = UserMusic(auth.uid, auth.access_token, output_folder=cli_args.output_folder, album=cli_args.album)
-    print('*' * 80, 'Downloading New Songs from Your vk Music Collection.', '*' * 80, sep='\n')
-    music.download()
-    print('*' * 80, 'Updating Songs Tags', '*' * 80, sep='\n')
-    music.update_tags()
-    print('#' * 80, 'Processing Time: {} seconds'.format(time.time() - t), sep='\n')
+    music = UserMusic(auth.uid, auth.access_token, output_folder=cli_args.output_folder, album=cli_args.album)()
