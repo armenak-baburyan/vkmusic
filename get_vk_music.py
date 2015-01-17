@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.4
 # -*- coding: utf-8 -*-
 
 import argparse
+import glob
 import json
 import os
 import shelve
@@ -85,7 +86,8 @@ class UserMusic(object):
         if not os.path.exists(self.output_folder):
             os.makedirs(self.output_folder)
 
-        self.folder_aids = {x[:-4] for x in os.listdir(self.output_folder)}
+        # '{04}_{}.mp3
+        self.folder_aids = {x[5:-4] for x in os.listdir(self.output_folder)}
 
         url = (
             "https://api.vkontakte.ru/method/audio.get.json?"
@@ -96,14 +98,14 @@ class UserMusic(object):
         self._content = json.loads(content.decode('utf-8'))
         self.music_list = self._content['response']
 
-        # self.tracks_map = OrderedDict()
         self.tracks_map = {}
-        for track in reversed(self.music_list):
+        for ind, track in enumerate(reversed(self.music_list)):
             self.tracks_map[str(track['aid'])] = {
+                'index': ind,
                 'artist': unescape(track['artist']),
                 'title': unescape(track['title']),
                 'url': track['url'],
-                'output_path': os.path.join(output_folder, '{}.mp3'.format(track['aid']))
+                'output_path': os.path.join(output_folder, '{}_{}.mp3'.format(format(ind, '04'), track['aid'])),
             }
 
     def __call__(self):
@@ -113,10 +115,12 @@ class UserMusic(object):
             self.pprint('Removing Deleted Songs')
 
             for drop_aid in drop_aids:
-                f = os.path.join(self.output_folder, '{}.mp3'.format(drop_aid))
-                os.remove(f)
-                print('\u2718', f)
-                self.folder_aids.remove(drop_aid)
+                pattern = os.path.join(self.output_folder, '*_{}.mp3'.format(drop_aid))
+                paths = glob.glob(pattern)
+                for pth in paths:
+                    os.remove(pth)
+                    print('\u2718', pth)
+                    self.folder_aids.remove(drop_aid)
 
         # which tracks to process
         for aid in self.folder_aids:
@@ -129,9 +133,9 @@ class UserMusic(object):
 
             self.pprint('Updating Songs Tags')
             self.update_tags()
-            print('#' * 80, 'Processing Time: {} seconds'.format(time.time() - t), sep='\n')
+            self.pprint('Processing Time: {} seconds'.format(time.time() - t), symbol='#')
         else:
-            print('*' * 80, 'Songs is up to date', '*' * 80, sep='\n')
+            self.pprint('Music collection is up to date')
 
     def download(self):
         with futures.ProcessPoolExecutor(max_workers=self.cpu_count) as executor:
@@ -172,7 +176,7 @@ class UserMusic(object):
 
     @staticmethod
     def pprint(s, symbol='*', count=80):
-        print(symbol * count, s, symbol*count, sep='\n')
+        print(symbol * count, s, symbol * count, sep='\n')
 
 
 if __name__ == '__main__':
